@@ -1,114 +1,223 @@
 # dockprom-remote-server
 
-Lightweight monitoring agent for GPU machines. Sends host, container, and GPU metrics to a central [dockprom](https://github.com/soiamayush/dockprom) dashboard.
+Remote monitoring agent stack for machines monitored by the central
+[`dockprom`](../dockprom) server.
 
-## How it works
+The same repo is intended to work for:
 
+- Windows / CPU-only testing machines
+- Linux CPU machines
+- Linux NVIDIA GPU machines
+
+The priority path is Linux + GPU, but the default mode is safe for CPU-only and
+Windows Docker Desktop so the stack does not fail when NVIDIA devices are not
+available.
+
+## Architecture
+
+```text
+central dockprom machine                         remote machine
+────────────────────────                         ─────────────────────────────
+Grafana dashboards                               dockprom-remote-server
+Prometheus                                       - otel-host-collector (default)
+otel-collector :4318  ◀── OTLP metrics ────────  - nodeexporter (Linux profile)
+                                                 - cadvisor (Linux profile)
+Prometheus scrapes :9100/:8080 if configured ◀── - otel-gpu-collector (GPU profile)
 ```
-  Machine 1 (central)                    Machine 2 (remote)
-  ─────────────────────                  ──────────────────────────
-  github.com/soiamayush/dockprom         github.com/soiamayush/dockprom-remote-server
-  Prometheus + Grafana + AlertManager    node-exporter
-  otel-collector (port 4318 open)   ←── cAdvisor
-  All dashboards here                    otel-gpu-collector (pushes GPU metrics)
+
+Use one stable `SERVER_ID` per physical/VM machine. This is what Grafana uses to
+separate servers.
+
+Examples:
+
+```env
+SERVER_ID=linux-main
+SERVER_ID=gpu-server-1
+SERVER_ID=windows-test-1
 ```
 
-Both machines show up in every Grafana dashboard — switch between them using the `server` dropdown.
+## Modes
 
----
+### Default: CPU-Safe Mode
 
-## Setup
+Runs:
 
-### Machine 1 — Central monitoring stack
+- `otel-host-collector`
+
+This mode does **not** require Linux host mounts or NVIDIA devices:
 
 ```bash
-git clone https://github.com/soiamayush/dockprom.git
-cd dockprom
-
-ADMIN_USER='admin' ADMIN_PASSWORD='admin' \
-ADMIN_PASSWORD_HASH='$2a$14$1l.IozJx7xQRVmlkEQ32OeEEfP5mRxTpbDTCTcXRqn19gXD8YK1pO' \
 docker compose up -d
 ```
 
-Grafana → `http://MACHINE1_IP:3000` (admin / admin)
+Use this for:
 
-Note your IP — you'll need it for machine 2:
+- Windows Docker Desktop testing
+- CPU-only machines
+- quick smoke tests
+
+Note: on Windows Docker Desktop this reports metrics from the Docker
+environment/VM, not native Windows host internals. For real Windows host metrics,
+install a native Windows exporter separately and scrape it from central
+Prometheus.
+
+### Linux Host Mode
+
+Runs:
+
+- `otel-host-collector`
+- `nodeexporter`
+- `cadvisor`
+
+Use this on Linux machines:
+
+```bash
+docker compose --profile linux up -d
+```
+
+### Linux NVIDIA GPU Mode
+
+Runs:
+
+- `otel-host-collector`
+- `nodeexporter`
+- `cadvisor`
+- `otel-gpu-collector`
+
+Use this on Linux NVIDIA machines:
+
+```bash
+NVIDIA_ML_LIB_PATH=/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.550.90.07 \
+docker compose --profile linux --profile gpu up -d
+```
+
+The helper script `./start.sh` auto-detects this when possible.
+
+## Setup
+
+### 1. Configure `.env`
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`:
+
+```env
+MAIN_SERVER_IP=<central-dockprom-ip>
+SERVER_ID=gpu-server-1
+```
+
+Find the central dockprom IP on the central machine:
+
 ```bash
 hostname -I | awk '{print $1}'
 ```
 
----
+### 2. Start On Linux
 
-### Machine 2 — Remote GPU agent
+Recommended:
 
-**1. Clone**
 ```bash
-git clone https://github.com/soiamayush/dockprom-remote-server.git
-cd dockprom-remote-server
+chmod +x start.sh
+./start.sh
 ```
 
-**2. Configure**
+The script:
+
+- starts Linux exporters on Linux
+- starts GPU collector only when `/dev/nvidia0` and `libnvidia-ml.so.*` exist
+- skips GPU safely on CPU-only machines
+
+Manual Linux CPU:
+
 ```bash
-cp .env.example .env
-```
-Open `.env` and set:
-```
-MAIN_SERVER_IP=<IP of machine 1>
-SERVER_ID=gpu-server-2
+docker compose --profile linux up -d
 ```
 
-**3. Find your NVIDIA lib version**
+Manual Linux GPU:
+
 ```bash
-ls /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.*
-```
-Open `docker-compose.yml`, replace `REPLACE_VERSION` with the version number you see (e.g. `550.90.07`):
-```yaml
-# before
-- /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.REPLACE_VERSION:...
-# after
-- /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.550.90.07:...
+NVIDIA_ML_LIB_PATH=$(ls /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.* | sort -V | tail -n 1) \
+docker compose --profile linux --profile gpu up -d
 ```
 
-**4. Start**
-```bash
+### 3. Start On Windows / CPU Test Machine
+
+PowerShell:
+
+```powershell
+.\start.ps1
+```
+
+Or plain Compose:
+
+```powershell
 docker compose up -d
 ```
 
-**5. Add machine 2 to Prometheus (on machine 1)**
+This intentionally starts only the CPU-safe collector.
 
-On machine 1, open `dockprom/prometheus/prometheus.yml`.
-Find the `# Add remote servers here` comments and uncomment + fill in machine 2's IP (2 places — nodeexporter and cadvisor):
-```yaml
-- targets: ['MACHINE2_IP:9100']
-  labels:
-    server_id: 'gpu-server-2'
+## Central Prometheus Setup
+
+The `otel-host-collector` and `otel-gpu-collector` push OTLP metrics to central
+`dockprom` on port `4318`, so make sure that port is reachable:
+
+```text
+http://MAIN_SERVER_IP:4318
 ```
 
-Then reload Prometheus — no restart needed:
+For Linux node/cAdvisor dashboards, also add the remote server IP to central
+`dockprom/prometheus/prometheus.yml` under the `nodeexporter` and `cadvisor`
+jobs:
+
+```yaml
+- targets: ['REMOTE_SERVER_IP:9100']
+  labels:
+    server_id: 'gpu-server-1'
+```
+
+```yaml
+- targets: ['REMOTE_SERVER_IP:8080']
+  labels:
+    server_id: 'gpu-server-1'
+```
+
+Reload Prometheus:
+
 ```bash
 curl -X POST http://admin:admin@localhost:9090/-/reload
 ```
 
----
-
 ## Verify
 
-```bash
-# on machine 2
-docker compose ps                  # all 3 should be "running"
-docker logs otel-gpu-collector     # no errors
+On the remote machine:
 
-# on machine 1
-# open http://MACHINE1_IP:9090/targets — machine 2 nodeexporter + cadvisor should be UP
-# open http://MACHINE1_IP:3000 → GPU Monitoring dashboard → server dropdown → both machines visible
+```bash
+docker compose ps
+docker logs --tail 30 otel-host-collector
+docker logs --tail 30 otel-gpu-collector   # GPU profile only
 ```
 
----
+On the central dockprom machine:
 
-## What each container collects
+```bash
+curl -s http://admin:admin@localhost:9090/api/v1/targets
+```
 
-| Container | Metrics |
-|-----------|---------|
-| node-exporter | CPU, RAM, disk, network, uptime |
-| cAdvisor | Docker container metrics |
-| otel-gpu-collector | GPU utilization, VRAM, temperature, power, clock speed |
+Then open Grafana:
+
+```text
+http://MAIN_SERVER_IP:3000
+```
+
+Select the machine by `SERVER_ID` / `server_id` in dashboards.
+
+## What Each Service Collects
+
+| Service | Default? | Platform | Metrics |
+|---|---:|---|---|
+| `otel-host-collector` | yes | Windows Docker Desktop / Linux | CPU-safe host metrics pushed to central OTLP |
+| `nodeexporter` | no, `linux` profile | Linux | CPU, RAM, disk, network, uptime for node dashboards |
+| `cadvisor` | no, `linux` profile | Linux | Docker container metrics |
+| `otel-gpu-collector` | no, `gpu` profile | Linux NVIDIA | GPU utilization, VRAM, temperature, power, clocks |

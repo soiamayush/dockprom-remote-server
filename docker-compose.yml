@@ -1,17 +1,45 @@
 # =============================================================================
 # dockprom-remote-server
-# Run this on your GPU machine to send metrics to the central dashboard.
 #
-# SETUP:
-#   1. cp .env.example .env  — then fill in MAIN_SERVER_IP and SERVER_ID
-#   2. Update the libnvidia-ml.so path below to match your driver version
-#        Run: ls /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.*
-#   3. docker compose up -d
+# Default mode is CPU-safe and can run on Windows Docker Desktop or Linux:
+#   docker compose up -d
+#
+# Linux host exporters:
+#   docker compose --profile linux up -d
+#
+# Linux NVIDIA GPU:
+#   NVIDIA_ML_LIB_PATH=/path/to/libnvidia-ml.so.x \
+#   docker compose --profile linux --profile gpu up -d
+#
+# Prefer ./start.sh on Linux or ./start.ps1 on Windows; they choose profiles.
 # =============================================================================
 
 services:
 
+  # Cross-platform-ish CPU/host metrics collector.
+  #
+  # This is intentionally the default service because it does not require
+  # /proc, /sys, /dev/nvidia*, host networking, or Linux-only mounts. On Windows
+  # Docker Desktop it reports metrics from the Docker environment, not native
+  # Windows host internals, but it keeps the remote agent stack runnable.
+  otel-host-collector:
+    image: otel/opentelemetry-collector-contrib:0.120.0
+    container_name: otel-host-collector
+    command: ["--config=/etc/otel-host-collector/config.yaml"]
+    environment:
+      MAIN_SERVER_IP: ${MAIN_SERVER_IP:?Set MAIN_SERVER_IP in .env}
+      SERVER_ID: ${SERVER_ID:-remote-cpu}
+    volumes:
+      - ./otel-host-collector.yaml:/etc/otel-host-collector/config.yaml:ro
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      org.label-schema.group: "monitoring"
+
+  # Linux-only host metrics for existing dockprom node-exporter dashboards.
   nodeexporter:
+    profiles: ["linux"]
     image: prom/node-exporter:v1.9.1
     container_name: nodeexporter
     volumes:
@@ -28,7 +56,9 @@ services:
     labels:
       org.label-schema.group: "monitoring"
 
+  # Linux-only Docker container metrics for existing dockprom cAdvisor dashboards.
   cadvisor:
+    profiles: ["linux"]
     image: gcr.io/cadvisor/cadvisor:v0.52.1
     container_name: cadvisor
     privileged: true
@@ -45,21 +75,20 @@ services:
     labels:
       org.label-schema.group: "monitoring"
 
+  # Linux + NVIDIA only. Do not run this on Windows CPU machines.
   otel-gpu-collector:
+    profiles: ["gpu"]
     image: ghcr.io/openlit/otel-gpu-collector:latest
     container_name: otel-gpu-collector
     environment:
-      OTEL_SERVICE_NAME: ${SERVER_ID:-remote-gpu}
+      OTEL_SERVICE_NAME: ${SERVER_ID:-remote-gpu}-gpu
       OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=production,server_id=${SERVER_ID:-remote-gpu}"
-      # Points to the central monitoring server — set MAIN_SERVER_IP in .env
-      OTEL_EXPORTER_OTLP_ENDPOINT: "http://${MAIN_SERVER_IP}:4318"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://${MAIN_SERVER_IP:?Set MAIN_SERVER_IP in .env}:4318"
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       OTEL_METRIC_EXPORT_INTERVAL: "15000"
     volumes:
       - /dev/dri:/dev/dri
-      # ↓ UPDATE THIS — replace with your libnvidia-ml.so filename
-      # Run: ls /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.*
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.REPLACE_VERSION:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+      - ${NVIDIA_ML_LIB_PATH:-/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1}:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
     devices:
       - /dev/nvidia0:/dev/nvidia0
       - /dev/nvidiactl:/dev/nvidiactl

@@ -1,0 +1,34 @@
+receivers:
+  hostmetrics:
+    collection_interval: 15s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      filesystem:
+      network:
+      load:
+      paging:
+      processes:
+
+processors:
+  resource:
+    attributes:
+      - key: server_id
+        value: ${env:SERVER_ID}
+        action: upsert
+      - key: deployment.environment
+        value: production
+        action: upsert
+  batch:
+
+exporters:
+  otlphttp:
+    endpoint: http://${env:MAIN_SERVER_IP}:4318
+
+service:
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [resource, batch]
+      exporters: [otlphttp]

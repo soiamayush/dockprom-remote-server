@@ -61,6 +61,16 @@ environment/VM, not native Windows host internals. For real Windows host metrics
 install a native Windows exporter separately and scrape it from central
 Prometheus.
 
+If you also want the existing Docker Host / Docker Containers dashboards to stop
+showing `N/A` during Windows testing, start the Linux exporter profile too:
+
+```powershell
+docker compose --profile linux up -d
+```
+
+Those `nodeexporter` / `cadvisor` metrics come from Docker Desktop's Linux VM,
+not from native Windows itself.
+
 ### Linux Host Mode
 
 Runs:
@@ -218,6 +228,6 @@ Select the machine by `SERVER_ID` / `server_id` in dashboards.
 | Service | Default? | Platform | Metrics |
 |---|---:|---|---|
 | `otel-host-collector` | yes | Windows Docker Desktop / Linux | CPU-safe host metrics pushed to central OTLP |
-| `nodeexporter` | no, `linux` profile | Linux | CPU, RAM, disk, network, uptime for node dashboards |
-| `cadvisor` | no, `linux` profile | Linux | Docker container metrics |
+| `nodeexporter` | no, `linux` profile | Linux / Docker Desktop VM | CPU, RAM, disk, network, uptime for node dashboards on port `9100` |
+| `cadvisor` | no, `linux` profile | Linux / Docker Desktop VM | Docker container metrics on port `8080` |
 | `otel-gpu-collector` | no, `gpu` profile | Linux NVIDIA | GPU utilization, VRAM, temperature, power, clocks |
